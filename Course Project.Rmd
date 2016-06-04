@@ -1,0 +1,223 @@
+---
+title: "Machine Learning Course Project - Prediction Assignment Writeup"
+author: "Bincheng Wu"
+date: "May 30, 2016"
+output: 
+  html_document: 
+    keep_md: yes
+---
+
+# Executive Summary
+
+The goal of this project is to predict the manner in which 20 participants exercised by building prediction models based on data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants.
+
+A model (Random Forest) is selected from four built on different method and a prediction for the 20 participants (testing data) is computed.
+
+# Model Selection Strategy
+
+The prediction model is selected based on best cross validation accuracy. 
+
+Four models (Recursive Partitioning and Regression Trees, Support Vector Machines, Generalized Boosted Regression Models and Random Forest) are trained on a training subset without any tunning. The result models are then validated against a probe data set. 
+
+Of the four models, that of Random Forest displayed the best accuracy (0.9921) when cross validated with the probe data set. 
+
+While not the deciding factor, computation time is an important consideration in real world applications. The random Forest model took the longest time to train, with a eye-watering elapsed time of ~700 seconds even while parallelized.
+
+In contrast, the SVM model took the an elapsed time of ~ 20 seconds to train while achieving an accuracy of (0.94), its combination of speed and accuracy is a competitive alternative.
+
+# Load Libraries and Packages
+
+```{r}
+library(caret)
+library(AppliedPredictiveModeling)
+library(doParallel)
+library(e1071)
+library(rattle)
+library(rpart)
+library(tictoc)
+knitr::opts_chunk$set(cache=TRUE)
+```
+
+# Data Acquisition
+
+```{r}
+
+if(!file.exists("data")){dir.create("data")}
+fileUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+#if(!file.exists("./data/pml-training.csv")){
+download.file(fileUrl, destfile = "./data/pml-training.csv", mode = "wb")#}
+
+if(!file.exists("data")){dir.create("data")}
+fileUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+#if(!file.exists("./data/pml-testing.csv")){
+download.file(fileUrl, destfile = "./data/pml-testing.csv", mode = "wb")#}
+
+list.files("./data")
+```
+
+```{r}
+training_data = read.csv("./data/pml-training.csv", header = TRUE, stringsAsFactors=FALSE, na.strings=c("NA", "#DIV/0!"))
+testing_data = read.csv("./data/pml-testing.csv", header = TRUE, stringsAsFactors=FALSE, na.strings=c("NA", "#DIV/0!"))
+
+dim(training_data)
+dim(testing_data)
+
+```
+
+# Data Cleaning
+
+User and timestamps variables are removed since they are likely not predictive features of out of sample data sets. E.g. while the training data only have six unique participants, the testing data will contain 20. 
+
+The 'classe' variable outcome is converted to factors to enable prediction model building.
+
+```{r}
+
+training_cleaned <- subset(training_data, select = -c(1:7)) # excluding user and timestamps
+
+training_cleaned$classe <- as.factor(training_data$classe) # convert the outcomes to factors
+
+dim(training_cleaned)
+```
+
+Feature variables are all converted to the numeric data class.
+
+```{r}
+for(i in 1:(ncol(training_cleaned)-1)) {training_cleaned[,i] <- as.numeric(as.character(training_cleaned[,i]))} 
+```
+
+No values are imputed. If a feature has one or more NA values, then it is excluded from the training data. 
+
+```{r}
+clean_feature_names <- colSums(is.na(training_cleaned)) == 0
+
+training_cleaned <- training_cleaned[clean_feature_names]
+
+dim(training_cleaned)
+```
+
+The same cleaning process is done for the testing data of the 20 participants in order to match the input formatting of the prediction model.
+
+```{r}
+
+testing_cleaned <- subset(testing_data, select = -c(1:7)) # excluding user and timestamps
+
+dim(testing_cleaned)
+
+for(i in 1:(ncol(testing_cleaned)-1)) {testing_cleaned[,i] <- as.numeric(as.character(testing_cleaned[,i]))} # convert feature variables to numeric
+
+# testing_cleaned$classe <- as.factor(testing_cleaned$classe) # testing doesn't have the results, of course
+
+clean_feature_names <- colSums(is.na(testing_cleaned)) == 0
+
+testing_cleaned <- testing_cleaned[clean_feature_names]
+
+dim(testing_cleaned)
+```
+
+# Partitioning the Training and Validation Data Sets
+
+As part of the prediction design, the training set is segmented into a training subset (60%) and a training probe data set (40%). Building the model on the training subset will prevent the model from overfitting. The probe data set will be used for validation.
+
+```{r}
+
+train_index <-createDataPartition(y=training_cleaned$classe, p=0.60,list=F)
+training_subset<-training_cleaned[train_index ,] 
+training_probe <-training_cleaned[-train_index ,] 
+
+```
+
+# Data Preprocessing
+
+In short, no preprocessing is applied after no near zero variance features and correlated predictors are discovered.
+
+### Check for Features' Variance
+
+In principal component analysis (PCA), ideal features have high variance so that each feature is as distant(orthogonal) as possible from the others. 
+
+```{r}
+nzv = nearZeroVar(training_subset)
+nzv
+
+```
+
+If nearZeroVar returned a value greater than zero, then it means there are features without variability and thus need to be removed. But since it returned zero, then it means all features have enough variance.
+
+### Identifying Correlated Predictors
+
+While certain models benefit from correlated predictors, other models benefit from reducing the level of correlation between the predictors. 
+
+```{r}
+training_cor <- cor(training_subset[,1:52])
+high_corr <- sum(abs(training_cor[upper.tri(training_cor)]) > .999)
+
+high_corr
+```
+
+Since there are no highly correlated ( >.999) features, no features are removed.
+
+# Model Building
+
+Four models (Decision Tree, Support Vector Machines, Generalized Boosted Regression Models and Random Forest) are built on the training subset.
+
+```{r}
+cl <- makeCluster(detectCores())
+registerDoParallel(cl)
+
+set.seed(as.numeric(as.Date("2016-05-30")))
+
+tic()
+rpart_model <- rpart(classe~., data = training_subset, method = 'class')
+rpart_train_time <- toc()
+
+tic()
+svm_model <- svm(classe ~., data = training_subset)
+svm_train_time <- toc()
+# svm_train_time <- svm_train_time$toc - svm_train_time$tic
+
+tic()
+gbm_model <- train(classe~., data = training_subset, method = 'gbm')
+gbm_train_time <- toc()
+
+tic()
+rf_model <- train(classe~., data = training_subset, method = 'rf')
+rf_train_time <- toc()
+
+stopCluster(cl)
+#registerDoSEQ()
+```
+
+# Cross Validation
+
+To select the more accurate model, the models are cross validated with the training probe data set to determine the out of sample error.
+
+Random forest seems to give the best accuracy (~0.99), followed by gbm (~0.96), svm (~0.94) and rpart(~0.74).
+
+```{r}
+# Recursive Partitioning and Regression Trees cross validation
+# fancyRpartPlot(rpart_model)
+rpart_predict <- predict(rpart_model, newdata = training_probe, type = 'class')
+confusionMatrix(rpart_predict, training_probe$classe)
+
+# Support Vector Machines cross validation
+svm_predict <- predict(svm_model, newdata = training_probe)
+confusionMatrix(svm_predict, training_probe$classe)
+
+# Generalized Boosted Regression Model cross validation
+gbm_predict <- predict(gbm_model, newdata = training_probe)
+confusionMatrix(gbm_predict, training_probe$classe)
+
+# Random Forest cross validation
+rf_predict <- predict(rf_model, newdata = training_probe)
+confusionMatrix(rf_predict, training_probe$classe)
+
+```
+
+# Prediction for the Testing Data
+
+The Random Forest model is applied to predict the outcomes for the testing data.
+
+```{r}
+test_predict <- predict(rf_model, newdata = testing_cleaned)
+
+# test_predict # results intentionally not shown
+```
